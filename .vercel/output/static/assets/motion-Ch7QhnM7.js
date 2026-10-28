@@ -1,0 +1,1 @@
+var e=[{providerId:`grok-google`,idp:`google`,label:`Google`},{providerId:`grok-x`,idp:`twitter`,label:`X`}],t=`animate__animated animate__fadeIn house-mark`,n=`animate__animated animate__fadeInUp`,r=`animate__animated animate__fadeInDown`,i=`animate__animated animate__pulse animate__repeat-1`;export{e as a,n as i,r as n,i as r,t};
