@@ -1,6 +1,5 @@
 import { getRequest } from "@tanstack/react-start/server";
 import { gateIdentityEnabled } from "./gate-identity.server";
-import { auth, authConfigured } from "./server";
 
 /**
  * Server-side session resolution (server-only).
@@ -14,17 +13,6 @@ import { auth, authConfigured } from "./server";
 
 /** True when a real database is configured server-side. */
 const databaseConfigured = Boolean(process.env.DATABASE_URL?.trim());
-
-/** Re-export so callers can branch on it without importing `server.ts`. */
-export { authConfigured };
-
-if (databaseConfigured && !authConfigured) {
-  console.error(
-    "[auth] DATABASE_URL is set but auth is disabled (VITE_AUTH_ENABLED=false) " +
-      "— requireUserId() will reject every request (fail closed) rather than " +
-      "share one dev user on a real database.",
-  );
-}
 
 /** Dev fallback user id, used only when auth is disabled (VITE_AUTH_ENABLED=false). */
 export const DEV_USER_ID = "dev-user";
@@ -57,6 +45,7 @@ export type VerifiedUser = { id: string; email: string | null };
 export async function getSessionUser(
   bearerToken?: string,
 ): Promise<VerifiedUser | null> {
+  const { authConfigured, getAuth } = await import("./server");
   if (!authConfigured && !gateIdentityEnabled()) return null;
   const request = getRequest();
   if (!request) return null;
@@ -65,6 +54,7 @@ export async function getSessionUser(
     headers = new Headers(request.headers);
     headers.set("Authorization", `Bearer ${bearerToken}`);
   }
+  const auth = await getAuth();
   const session = await auth.api.getSession({ headers });
   if (!session?.user) return null;
   return { id: session.user.id, email: session.user.email ?? null };
@@ -82,6 +72,7 @@ export async function getSessionUser(
  * - Auth disabled + no database -> the shared dev user id.
  */
 export async function requireUserId(bearerToken?: string): Promise<string> {
+  const { authConfigured } = await import("./server");
   if (!authConfigured && !gateIdentityEnabled()) {
     if (databaseConfigured) {
       throw new Error(

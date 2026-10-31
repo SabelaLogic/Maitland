@@ -44,12 +44,11 @@ import {
   type Kysely,
   type QueryResult,
 } from "kysely";
-import { getPglite, getSql, activeDbSource, type Sql } from "../db";
+import { d1Dialect } from "./d1-dialect";
 import { emailAndPasswordEnabled } from "./email-password";
 import { GATE_PROVIDER_ID, gateIdentitySessions } from "./gate-session.server";
 import { GROK_PROVIDERS } from "./providers";
 import { pgliteDialect } from "./pglite-dialect";
-import { d1Dialect } from "./d1-dialect";
 import {
   GROK_ISSUER_DEFAULT,
   PREVIEW_ALLOWED_HOSTS,
@@ -132,66 +131,17 @@ const trustedOrigins: string[] = explicitBaseURL
       ...LOCAL_DEV_ORIGINS,
     ];
 
-const databaseUrl = env("DATABASE_URL");
-
-/** Opens the app database on the first auth query. Nothing here runs at import. */
-function lazySqlDialect(): Dialect {
-  return {
-    createAdapter: () => new PostgresAdapter(),
-    createDriver: () => new LazySqlDriver(),
-    createQueryCompiler: () => new PostgresQueryCompiler(),
-    createIntrospector: (db: Kysely<unknown>) => new PostgresIntrospector(db),
-  };
-}
-
-class LazySqlDriver {
-  async init(): Promise<void> {}
-  async acquireConnection(): Promise<DatabaseConnection> {
-    return new SqlConnection(await getSql());
-  }
-  async beginTransaction(connection: DatabaseConnection): Promise<void> {
-    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("begin"));
-  }
-  async commitTransaction(connection: DatabaseConnection): Promise<void> {
-    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("commit"));
-  }
-  async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
-    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("rollback"));
-  }
-  async releaseConnection(): Promise<void> {}
-  async destroy(): Promise<void> {}
-}
-
-class SqlConnection implements DatabaseConnection {
-  constructor(private readonly sql: Sql) {}
-  async executeQuery<R>(compiled: CompiledQuery): Promise<QueryResult<R>> {
-    const rows = await this.sql.query<R>(compiled.sql, [...compiled.parameters]);
-    return { rows };
-  }
-  async *streamQuery<R>(
-    compiled: CompiledQuery,
-  ): AsyncIterableIterator<QueryResult<R>> {
-    yield await this.executeQuery<R>(compiled);
-  }
-}
-
-// Cloudflare uses the D1 binding `DB`. Anywhere else, the first auth query
-// goes through getSql() (Neon when DATABASE_URL is set, PGLite in preview).
-// No Pool is constructed while this module is imported.
-const database =
-  activeDbSource() === "d1"
-    ? { dialect: d1Dialect(), type: "sqlite" as const }
-    : databaseUrl
-      ? { dialect: lazySqlDialect(), type: "postgres" as const }
-      : { dialect: pgliteDialect(() => getPglite()), type: "postgres" as const };
-
-/** Session token cookie name — also read by the live-preview popup completion page. */
-export const SESSION_TOKEN_COOKIE = "__Host-grok-auth.session_token";
-
+// Static broker OAuth endpoints (skip OIDC discovery on every sign-in / callback).
+// Discovery would cost an extra network hop to the broker before the popup can
+// even redirect to Google/X — the live-preview popup felt stuck on the app for
+// that whole round-trip. These paths match the broker's discovery document.
 const issuerBase = grokIssuer.replace(/\/+$/, "");
 const grokAuthorizationUrl = `${issuerBase}/api/auth/oauth2/authorize`;
 const grokTokenUrl = `${issuerBase}/api/auth/oauth2/token`;
 const grokUserInfoUrl = `${issuerBase}/api/auth/oauth2/userinfo`;
+
+/** Session token cookie name — also read by the live-preview popup completion page. */
+export const SESSION_TOKEN_COOKIE = "__Host-grok-auth.session_token";
 
 // Built separately so the `betterAuth({...})` call stays easy to edit without
 // breaking brackets (models often trip on the conditional plugin spread).
@@ -217,7 +167,75 @@ const grokOAuthPlugin = authConfigured
     })
   : null;
 
-export const auth = betterAuth({
+type SessionAuth = {
+  handler: (request: Request) => Promise<Response>;
+  api: {
+    getSession: (args: {
+      headers: Headers;
+    }) => Promise<{ user?: { id: string; email?: string | null } } | null>;
+    signInWithOAuth2: (args: {
+      body: { providerId: string; callbackURL: string; errorCallbackURL: string };
+      headers: Headers;
+      asResponse: true;
+    }) => Promise<Response>;
+  };
+};
+
+let authSingleton: SessionAuth | undefined;
+
+function sqlDialect(): Dialect {
+  return {
+    createAdapter: () => new PostgresAdapter(),
+    createDriver: () => ({
+      async init() {},
+      async acquireConnection(): Promise<DatabaseConnection> {
+        const { getSql } = await import("@/lib/db");
+        return {
+          async executeQuery<R>(compiled: CompiledQuery): Promise<QueryResult<R>> {
+            const sql = await getSql();
+            const rows = await sql.query<R>(compiled.sql, [...compiled.parameters]);
+            return { rows };
+          },
+          async *streamQuery<R>(compiled: CompiledQuery): AsyncIterableIterator<QueryResult<R>> {
+            const sql = await getSql();
+            const rows = await sql.query<R>(compiled.sql, [...compiled.parameters]);
+            yield { rows };
+          },
+        };
+      },
+      async beginTransaction(connection: DatabaseConnection) {
+        await connection.executeQuery(CompiledQuery.raw("begin"));
+      },
+      async commitTransaction(connection: DatabaseConnection) {
+        await connection.executeQuery(CompiledQuery.raw("commit"));
+      },
+      async rollbackTransaction(connection: DatabaseConnection) {
+        await connection.executeQuery(CompiledQuery.raw("rollback"));
+      },
+      async releaseConnection() {},
+      async destroy() {},
+    }),
+    createQueryCompiler: () => new PostgresQueryCompiler(),
+    createIntrospector: (db: Kysely<unknown>) => new PostgresIntrospector(db),
+  };
+}
+
+/**
+ * First call that needs a session builds Better Auth.
+ * Importing this module does not import `pg` or open a database.
+ * Cloudflare uses the D1 binding `DB`.
+ */
+async function createAuth() {
+  if (authSingleton) return authSingleton;
+  const { getPglite, activeDbSource } = await import("@/lib/db");
+  const source = activeDbSource();
+  const database =
+    source === "d1"
+      ? { dialect: d1Dialect(), type: "sqlite" as const }
+      : source === "pglite"
+        ? { dialect: pgliteDialect(() => getPglite()), type: "postgres" as const }
+        : { dialect: sqlDialect(), type: "postgres" as const };
+  return betterAuth({
   baseURL,
   // Deployed apps inject BETTER_AUTH_SECRET. Preview: process-stable secret on
   // globalThis so HMR doesn't invalidate PGLite-backed sessions (see above).
@@ -295,7 +313,13 @@ export const auth = betterAuth({
     // last so it runs after every other plugin's hooks.
     tanstackStartCookies(),
   ],
-});
+  }) as SessionAuth;
+}
+
+export async function getAuth() {
+  authSingleton ??= await createAuth();
+  return authSingleton;
+}
 
 export function readSessionToken(): string | null {
   return getCookie(SESSION_TOKEN_COOKIE) ?? null;

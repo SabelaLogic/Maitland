@@ -16,7 +16,6 @@
  * React route here paints the full app shell in the popup. The opener lives in
  * `client.ts` (`signIn` → `openSignInPopup`).
  */
-import { auth, SESSION_TOKEN_COOKIE } from "./server";
 
 /** Message shape the popup posts to the opener (must match `client.ts`). */
 type PopupMessage = {
@@ -33,6 +32,8 @@ export async function handleAuthPopupRequest(request: Request): Promise<Response
   const url = new URL(request.url);
   const done = url.searchParams.get("done") === "1";
 
+  const { getAuth, SESSION_TOKEN_COOKIE } = await import("./server");
+  const auth = await getAuth();
   if (done) {
     const errored = url.searchParams.has("error");
     const token = errored ? null : readCookie(request, SESSION_TOKEN_COOKIE);
