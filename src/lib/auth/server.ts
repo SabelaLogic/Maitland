@@ -112,7 +112,7 @@ const LOCAL_DEV_ORIGINS: string[] = [
 const baseURL = explicitBaseURL ?? {
   // Include loopback hosts so dynamic baseURL resolves for local email/password
   // (not only the preview wildcard).
-  allowedHosts: [...previewAllowedHosts, "localhost", "127.0.0.1", "[::1]"],
+  allowedHosts: [...previewAllowedHosts, "localhost", "127.0.0.1", "[::1]", "maitland.sabelalogic.workers.dev"],
   // `auto` → trust both http:// and https:// expansions of allowedHosts
   // (preview is https; local dev is http).
   protocol: "auto" as const,
@@ -121,8 +121,9 @@ const baseURL = explicitBaseURL ?? {
 
 // Origins Better Auth accepts on credentialed POSTs (sign-up/sign-in, etc.).
 // Missing entries here surface as FORBIDDEN "Invalid origin".
+const HOUSE_ORIGIN = "https://maitland.sabelalogic.workers.dev";
 const trustedOrigins: string[] = explicitBaseURL
-  ? [explicitBaseURL, ...LOCAL_DEV_ORIGINS]
+  ? [explicitBaseURL, HOUSE_ORIGIN, ...LOCAL_DEV_ORIGINS]
   : [
       // Host wildcards (matched against Origin's host)
       ...previewAllowedHosts,
@@ -255,9 +256,11 @@ async function createAuth() {
   // never merges them into one user — they stay separate identities.
   account: {
     encryptOAuthTokens: true,
+    storeStateStrategy: "cookie",
     accountLinking: {
       enabled: true,
       trustedProviders: [
+        "google",
         ...GROK_PROVIDERS.map((p) => p.providerId),
         GATE_PROVIDER_ID,
       ],
@@ -275,6 +278,18 @@ async function createAuth() {
 
   // Local email/password — toggled only via `./email-password` (not a plugin).
   ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true } } : {}),
+
+  ...(env("GOOGLE_CLIENT_ID") && env("GOOGLE_CLIENT_SECRET")
+    ? {
+        socialProviders: {
+          google: {
+            clientId: env("GOOGLE_CLIENT_ID") as string,
+            clientSecret: env("GOOGLE_CLIENT_SECRET") as string,
+            prompt: "select_account",
+          },
+        },
+      }
+    : {}),
 
   // `__Host-` prefixed cookies: the browser REFUSES any same-named cookie that
   // carries a `Domain` attribute, so a sibling `*.grok.me` app cannot "toss" a

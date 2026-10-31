@@ -143,6 +143,17 @@ export async function signIn(
     return;
   }
 
+  if (providerId === "google" || providerId === "grok-google") {
+    const { data, error } = await authClient.signIn.social({
+      provider: "google",
+      callbackURL,
+      errorCallbackURL,
+    });
+    if (error) throw new Error(error.message ?? "Gmail sign-in failed");
+    if (data?.url) window.location.href = data.url;
+    return;
+  }
+
   const { data, error } = await authClient.signIn.oauth2({
     providerId,
     callbackURL,
