@@ -11,20 +11,23 @@ const rawDatabaseUrl =
 const databaseUrl =
   rawDatabaseUrl && rawDatabaseUrl.trim() ? rawDatabaseUrl : undefined;
 
+/** Cloudflare Workers. Preview and Node do not define `WebSocketPair`. */
+function onCloudflareWorkers(): boolean {
+  if (typeof navigator !== "undefined" && /cloudflare/i.test(navigator.userAgent)) {
+    return true;
+  }
+  const runtime = globalThis as { WebSocketPair?: unknown };
+  return typeof window === "undefined" && typeof runtime.WebSocketPair === "function";
+}
+
 /**
- * Active backend: real **Neon** when `DATABASE_URL` is set, **D1** on Cloudflare
- * Workers (persistent desk data), otherwise the local **PGLite** preview.
- * Decided when a query runs, not when this file is imported, so a Node build
- * does not lock the process into the Workers path.
+ * Active backend: real **Neon** when `DATABASE_URL` is set, the D1 binding
+ * **DB** on Cloudflare Workers, otherwise the local **PGLite** preview.
+ * Decided when a query runs, not when this file is imported.
  */
 export function activeDbSource(): DbSource {
-  if (databaseUrl) return "neon";
-  if (
-    typeof navigator !== "undefined" &&
-    navigator.userAgent === "Cloudflare-Workers"
-  ) {
-    return "d1";
-  }
+  if (databaseUrl && !onCloudflareWorkers()) return "neon";
+  if (onCloudflareWorkers()) return "d1";
   return "pglite";
 }
 
@@ -275,21 +278,17 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
  * Finish DB bootstrap before the server handles traffic.
  *
  * - **PGLite** (preview / no `DATABASE_URL`): open the in-memory DB and apply
- *   `migrations/*.sql`. Idempotent — concurrent callers share one promise.
- * - **D1** (Cloudflare): apply the same migrations, translated to SQLite.
- *   A missing binding does not crash the public page. The desk reports it
- *   when someone actually asks for a reservation.
+ *   `migrations/*.sql`.
+ * - **D1** (Cloudflare): use the `DB` binding. Never open PGLite there.
  *
- * Vite `configureServer` awaits this at dev startup.
+ * This never throws. A failed bootstrap is logged and the public page still
+ * renders. Desk calls report the database error themselves.
  */
 export function ensureDbReady(): Promise<void> {
-  const source = activeDbSource();
-  if (source === "neon") return Promise.resolve();
+  if (activeDbSource() === "neon") return Promise.resolve();
   return getSql()
     .then(() => undefined)
     .catch((err) => {
       console.error("[db] bootstrap failed:", err);
-      if (source === "d1") return undefined;
-      throw err;
     });
 }
