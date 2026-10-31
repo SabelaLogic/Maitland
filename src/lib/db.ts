@@ -1,7 +1,8 @@
 import { pendingMigrations } from "../../scripts/migration-plan.mjs";
+import { toD1Query, toSqlite } from "./sqlite-sql";
 
 /** Which database backend is active. */
-export type DbSource = "neon" | "pglite";
+export type DbSource = "neon" | "pglite" | "d1";
 
 // An empty/whitespace DATABASE_URL (an easy misconfig in deploy UIs) must mean
 // "unset" — otherwise production would silently run on the PGLite fallback.
@@ -11,11 +12,23 @@ const databaseUrl =
   rawDatabaseUrl && rawDatabaseUrl.trim() ? rawDatabaseUrl : undefined;
 
 /**
- * Active backend: real **Neon** when `DATABASE_URL` is set (deployed / configured
- * sandbox), otherwise a local embedded **PGLite** (Postgres compiled to WASM) so
- * the app has a working database even with nothing configured — the live preview
- * included. Swap in Neon later by just setting `DATABASE_URL`; no code changes.
+ * Active backend: real **Neon** when `DATABASE_URL` is set, **D1** on Cloudflare
+ * Workers (persistent desk data), otherwise the local **PGLite** preview.
+ * Decided when a query runs, not when this file is imported, so a Node build
+ * does not lock the process into the Workers path.
  */
+export function activeDbSource(): DbSource {
+  if (databaseUrl) return "neon";
+  if (
+    typeof navigator !== "undefined" &&
+    navigator.userAgent === "Cloudflare-Workers"
+  ) {
+    return "d1";
+  }
+  return "pglite";
+}
+
+/** @deprecated Use activeDbSource(). Kept so older imports keep compiling. */
 export const dbSource: DbSource = databaseUrl ? "neon" : "pglite";
 
 /**
@@ -167,6 +180,52 @@ async function createPgliteSql(): Promise<Sql> {
   });
 }
 
+type D1Database = {
+  prepare(query: string): {
+    bind(...values: unknown[]): {
+      all<T>(): Promise<{ results?: T[] }>;
+      run(): Promise<unknown>;
+    };
+  };
+  exec(query: string): Promise<unknown>;
+};
+
+async function workersBinding(): Promise<D1Database | undefined> {
+  const load = new Function("specifier", "return import(specifier)") as (
+    specifier: string,
+  ) => Promise<{ env: { DB?: D1Database } }>;
+  const { env } = await load("cloudflare:workers");
+  return env.DB;
+}
+
+async function createD1Sql(): Promise<Sql> {
+  const db = await workersBinding();
+  if (!db) {
+    throw new Error(
+      "The desk database is not attached. Create a Cloudflare D1 database named maitland and put its id in wrangler.jsonc.",
+    );
+  }
+  await db.exec(
+    "create table if not exists _migrations (name text primary key, applied_at text not null default (datetime('now')))",
+  );
+  const migrations = import.meta.glob("/migrations/*.sql", {
+    query: "?raw",
+    import: "default",
+    eager: true,
+  }) as Record<string, string>;
+  const done = await db.prepare("select name from _migrations").bind().all<{ name: string }>();
+  const applied = (done.results ?? []).map((row) => row.name);
+  for (const { name, path } of pendingMigrations(Object.keys(migrations), applied)) {
+    await db.exec(toSqlite(migrations[path]));
+    await db.prepare("insert into _migrations (name) values (?)").bind(name).run();
+  }
+  return toSql(async <T>(text: string, params: unknown[]) => {
+    const query = toD1Query(text, params);
+    const result = await db.prepare(query.sql).bind(...query.params).all<T>();
+    return result.results ?? [];
+  });
+}
+
 let sqlPromise: Promise<Sql> | null = null;
 
 async function createSql(): Promise<Sql> {
@@ -176,7 +235,10 @@ async function createSql(): Promise<Sql> {
         "or a server route loader, never from client code.",
     );
   }
-  return dbSource === "neon" ? createNeonSql() : createPgliteSql();
+  const source = activeDbSource();
+  if (source === "neon") return createNeonSql();
+  if (source === "d1") return createD1Sql();
+  return createPgliteSql();
 }
 
 /**
@@ -200,7 +262,7 @@ export function getSql(): Promise<Sql> {
  * Kysely dialect). Throws when `DATABASE_URL` is set (that path uses Neon).
  */
 export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite> {
-  if (dbSource !== "pglite") {
+  if (activeDbSource() !== "pglite") {
     throw new Error("getPglite() is only available on the PGLite fallback (no DATABASE_URL)");
   }
   await getSql();
@@ -214,20 +276,20 @@ export async function getPglite(): Promise<import("@electric-sql/pglite").PGlite
  *
  * - **PGLite** (preview / no `DATABASE_URL`): open the in-memory DB and apply
  *   `migrations/*.sql`. Idempotent — concurrent callers share one promise.
- * - **Neon**: no-op (pool is created lazily on first query).
+ * - **D1** (Cloudflare): apply the same migrations, translated to SQLite.
+ *   A missing binding does not crash the public page. The desk reports it
+ *   when someone actually asks for a reservation.
  *
- * Vite `configureServer` awaits this at dev startup; production imports of this
- * module kick it off immediately (see bottom of file).
+ * Vite `configureServer` awaits this at dev startup.
  */
 export function ensureDbReady(): Promise<void> {
-  if (dbSource !== "pglite") return Promise.resolve();
-  try {
-    if (typeof caches !== "undefined") {
-      console.warn("Skipping PGlite on Cloudflare");
-      return Promise.resolve();
-    }
-  } catch {
-    /* ignore */
-  }
-  return getSql().then(() => undefined).catch(() => undefined);
+  const source = activeDbSource();
+  if (source === "neon") return Promise.resolve();
+  return getSql()
+    .then(() => undefined)
+    .catch((err) => {
+      console.error("[db] bootstrap failed:", err);
+      if (source === "d1") return undefined;
+      throw err;
+    });
 }
