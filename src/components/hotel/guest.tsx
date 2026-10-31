@@ -6,6 +6,7 @@ import { GROK_PROVIDERS, authClient, signIn } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import {
   ACCESS_CENTS,
+  PAY_URL,
   accountStatus,
   beginAnonymous,
   finalizePayment,
@@ -108,12 +109,28 @@ export function GuestHome() {
     setBusy(true);
     setError("");
     try {
-      const started = await beginAnonymous({ data: { contact: email.trim(), hostessKey: host.key } });
-      const paid = await startPaystack({
-        amountCents: ACCESS_CENTS,
-        email: payEmail(email),
-        description: "Executive access, anonymous",
-      });
+      let started: { guestId: string; secret: string } | null = null;
+      try {
+        started = await beginAnonymous({ data: { contact: email.trim(), hostessKey: host.key } });
+      } catch {
+        started = null;
+      }
+      if (!started) {
+        window.location.assign(PAY_URL);
+        return;
+      }
+      let paid: { reference: string };
+      try {
+        paid = await startPaystack({
+          amountCents: ACCESS_CENTS,
+          email: payEmail(email),
+          description: "Executive access, anonymous",
+        });
+      } catch (e) {
+        if (errText(e).toLowerCase().includes("closed")) throw e;
+        window.location.assign(PAY_URL);
+        return;
+      }
       const next = await finalizePayment({
         data: { guestId: started.guestId, secret: started.secret, reference: paid.reference },
       });
@@ -144,6 +161,10 @@ export function GuestHome() {
   }
 
   async function sendEmailAccount() {
+    if (!email.includes("@") || password.length < 8) {
+      setError("Use a real email and a password of at least 8 characters.");
+      return;
+    }
     setBusy(true);
     setError("");
     setActivation("");
@@ -262,11 +283,13 @@ export function GuestHome() {
             <img src={nextHost.portrait} alt="" />
           </button>
           <article key={host.key} className={`${arrive} fan-card front`}>
-            <img src={host.portrait} alt="" />
-            <div className="fan-ov">
-              <div className="fan-name">{host.name}</div>
-              <div className="fan-vibe">{host.vibe}</div>
-            </div>
+            <button type="button" className="fan-hit" onClick={startChat} aria-label={`Open a line with ${host.name}`}>
+              <img src={host.portrait} alt="" />
+              <div className="fan-ov">
+                <div className="fan-name">{host.name}</div>
+                <div className="fan-vibe">{host.vibe}</div>
+              </div>
+            </button>
           </article>
           <span className="sr-only">{prevHost.name}</span>
         </div>
@@ -363,7 +386,14 @@ export function GuestHome() {
             ) : (
               <div className="mt-4 flex flex-col gap-4">
                 {gmail ? (
-                  <GoldButton onClick={() => signIn(gmail.providerId, { callbackURL: "/" })}>Continue with Gmail</GoldButton>
+                  <GoldButton
+                    onClick={() => {
+                      setError("");
+                      void signIn(gmail.providerId, { callbackURL: "/" }).catch((e) => setError(errText(e)));
+                    }}
+                  >
+                    Continue with Gmail
+                  </GoldButton>
                 ) : null}
                 <form
                   className="flex flex-col gap-2"
@@ -376,7 +406,7 @@ export function GuestHome() {
                   <input value={name} placeholder="Name" onChange={(e) => setName(e.target.value)} />
                   <input value={email} type="email" placeholder="Email" onChange={(e) => setEmail(e.target.value)} />
                   <input value={password} type="password" placeholder="Password" onChange={(e) => setPassword(e.target.value)} />
-                  <button type="submit" disabled={busy || !email.includes("@") || password.length < 8} className="min-h-11 rounded-full border border-gold text-sm text-gold disabled:opacity-50">
+                  <button type="submit" disabled={busy} className="min-h-11 rounded-full border border-gold text-sm text-gold disabled:opacity-50">
                     Send activation link
                   </button>
                   {activation ? (
@@ -391,6 +421,9 @@ export function GuestHome() {
                   <GoldButton disabled={busy} onClick={payAnonymous}>
                     {busy ? "Waiting on Paystack…" : `Pay ${zar(ACCESS_CENTS)} with Paystack`}
                   </GoldButton>
+                  <a className="text-center text-sm text-gold underline" href={PAY_URL} target="_blank" rel="noreferrer">
+                    Open the Paystack page
+                  </a>
                 </div>
                 {ready ? (
                   <GoldButton disabled={busy} onClick={openWithAccount}>

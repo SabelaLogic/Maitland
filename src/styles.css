@@ -172,7 +172,7 @@
   display: flex;
   justify-content: space-between;
   gap: 8px;
-  padding: 22px 14px 0;
+  padding: calc(22px + env(safe-area-inset-top)) 14px 0;
 }
 
 .tab-btn,
@@ -251,6 +251,17 @@
   object-position: center 16%;
 }
 
+.fan-hit {
+  position: absolute;
+  inset: 0;
+  display: block;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+}
+
 .fan-card.peek {
   z-index: 1;
   top: 16%;
@@ -294,7 +305,7 @@
   position: absolute;
   z-index: 4;
   right: 0;
-  bottom: 16px;
+  bottom: calc(16px + env(safe-area-inset-bottom));
   left: 0;
   display: flex;
   flex-wrap: wrap;
