@@ -34,8 +34,17 @@ import { bearer, genericOAuth } from "better-auth/plugins";
 import { tanstackStartCookies } from "better-auth/tanstack-start";
 import { getCookie } from "@tanstack/react-start/server";
 import { randomBytes } from "node:crypto";
-import { Pool } from "pg";
-import { ensureDbReady, getPglite, activeDbSource } from "../db";
+import {
+  CompiledQuery,
+  PostgresAdapter,
+  PostgresIntrospector,
+  PostgresQueryCompiler,
+  type DatabaseConnection,
+  type Dialect,
+  type Kysely,
+  type QueryResult,
+} from "kysely";
+import { getPglite, getSql, activeDbSource, type Sql } from "../db";
 import { emailAndPasswordEnabled } from "./email-password";
 import { GATE_PROVIDER_ID, gateIdentitySessions } from "./gate-session.server";
 import { GROK_PROVIDERS } from "./providers";
@@ -47,9 +56,6 @@ import {
   PREVIEW_CLIENT_ID,
   PREVIEW_CLIENT_SECRET,
 } from "./preview";
-
-// Kick (and share) PGLite bootstrap as soon as the auth server module loads.
-void ensureDbReady();
 
 /**
  * Preview secret must outlive module reloads: PGLite (and its session rows) is
@@ -128,29 +134,64 @@ const trustedOrigins: string[] = explicitBaseURL
 
 const databaseUrl = env("DATABASE_URL");
 
-// Static broker OAuth endpoints (skip OIDC discovery on every sign-in / callback).
-// Discovery would cost an extra network hop to the broker before the popup can
-// even redirect to Google/X — the live-preview popup felt stuck on the app for
-// that whole round-trip. These paths match the broker's discovery document.
-const issuerBase = grokIssuer.replace(/\/+$/, "");
-const grokAuthorizationUrl = `${issuerBase}/api/auth/oauth2/authorize`;
-const grokTokenUrl = `${issuerBase}/api/auth/oauth2/token`;
-const grokUserInfoUrl = `${issuerBase}/api/auth/oauth2/userinfo`;
+/** Opens the app database on the first auth query. Nothing here runs at import. */
+function lazySqlDialect(): Dialect {
+  return {
+    createAdapter: () => new PostgresAdapter(),
+    createDriver: () => new LazySqlDriver(),
+    createQueryCompiler: () => new PostgresQueryCompiler(),
+    createIntrospector: (db: Kysely<unknown>) => new PostgresIntrospector(db),
+  };
+}
 
-// Real Postgres when `DATABASE_URL` is set (deployed apps), else the app's
-// embedded PGLite (preview) via a Kysely dialect — so Better Auth persists to the
-// SAME DB as app data, including email/password users. Both use the Better Auth
-// schema from `migrations/auth/0001_auth.sql`, copied into `migrations/` when
-// the app turns sign-in on.
+class LazySqlDriver {
+  async init(): Promise<void> {}
+  async acquireConnection(): Promise<DatabaseConnection> {
+    return new SqlConnection(await getSql());
+  }
+  async beginTransaction(connection: DatabaseConnection): Promise<void> {
+    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("begin"));
+  }
+  async commitTransaction(connection: DatabaseConnection): Promise<void> {
+    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("commit"));
+  }
+  async rollbackTransaction(connection: DatabaseConnection): Promise<void> {
+    await (connection as SqlConnection).executeQuery(CompiledQuery.raw("rollback"));
+  }
+  async releaseConnection(): Promise<void> {}
+  async destroy(): Promise<void> {}
+}
+
+class SqlConnection implements DatabaseConnection {
+  constructor(private readonly sql: Sql) {}
+  async executeQuery<R>(compiled: CompiledQuery): Promise<QueryResult<R>> {
+    const rows = await this.sql.query<R>(compiled.sql, [...compiled.parameters]);
+    return { rows };
+  }
+  async *streamQuery<R>(
+    compiled: CompiledQuery,
+  ): AsyncIterableIterator<QueryResult<R>> {
+    yield await this.executeQuery<R>(compiled);
+  }
+}
+
+// Cloudflare uses the D1 binding `DB`. Anywhere else, the first auth query
+// goes through getSql() (Neon when DATABASE_URL is set, PGLite in preview).
+// No Pool is constructed while this module is imported.
 const database =
   activeDbSource() === "d1"
     ? { dialect: d1Dialect(), type: "sqlite" as const }
     : databaseUrl
-      ? new Pool({ connectionString: databaseUrl })
+      ? { dialect: lazySqlDialect(), type: "postgres" as const }
       : { dialect: pgliteDialect(() => getPglite()), type: "postgres" as const };
 
 /** Session token cookie name — also read by the live-preview popup completion page. */
 export const SESSION_TOKEN_COOKIE = "__Host-grok-auth.session_token";
+
+const issuerBase = grokIssuer.replace(/\/+$/, "");
+const grokAuthorizationUrl = `${issuerBase}/api/auth/oauth2/authorize`;
+const grokTokenUrl = `${issuerBase}/api/auth/oauth2/token`;
+const grokUserInfoUrl = `${issuerBase}/api/auth/oauth2/userinfo`;
 
 // Built separately so the `betterAuth({...})` call stays easy to edit without
 // breaking brackets (models often trip on the conditional plugin spread).
