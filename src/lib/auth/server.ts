@@ -76,6 +76,23 @@ const env = (key: string): string | undefined => {
   return value ? value : undefined;
 };
 
+/** Cloudflare dashboard secrets are on the worker binding, not always on process.env. */
+async function workerValue(key: string): Promise<string | undefined> {
+  const fromProcess = env(key);
+  if (fromProcess) return fromProcess;
+  try {
+    const load = new Function("specifier", "return import(specifier)") as (
+      specifier: string,
+    ) => Promise<{ env: Record<string, unknown> }>;
+    const { env: cf } = await load("cloudflare:workers");
+    const value = cf[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
 // Explicit off-switch. The deployer sets `VITE_AUTH_ENABLED=true` when it
 // provisions auth; set it to "false" to force auth off everywhere (dev user).
 const authDisabled = env("VITE_AUTH_ENABLED") === "false";
@@ -236,11 +253,15 @@ async function createAuth() {
       : source === "pglite"
         ? { dialect: pgliteDialect(() => getPglite()), type: "postgres" as const }
         : { dialect: sqlDialect(), type: "postgres" as const };
+  const googleId = await workerValue("GOOGLE_CLIENT_ID");
+  const googleSecret = await workerValue("GOOGLE_CLIENT_SECRET");
+  const authSecret = (await workerValue("BETTER_AUTH_SECRET")) ?? previewAuthSecret();
+  const authUrl = (await workerValue("BETTER_AUTH_URL")) ?? baseURL;
   return betterAuth({
-  baseURL,
+  baseURL: authUrl,
   // Deployed apps inject BETTER_AUTH_SECRET. Preview: process-stable secret on
   // globalThis so HMR doesn't invalidate PGLite-backed sessions (see above).
-  secret: env("BETTER_AUTH_SECRET") ?? previewAuthSecret(),
+  secret: authSecret,
   database,
 
   // CSRF / origin check for credentialed auth POSTs (email sign-up/sign-in, …).
@@ -279,12 +300,12 @@ async function createAuth() {
   // Local email/password — toggled only via `./email-password` (not a plugin).
   ...(emailAndPasswordEnabled ? { emailAndPassword: { enabled: true } } : {}),
 
-  ...(env("GOOGLE_CLIENT_ID") && env("GOOGLE_CLIENT_SECRET")
+  ...(googleId && googleSecret
     ? {
         socialProviders: {
           google: {
-            clientId: env("GOOGLE_CLIENT_ID") as string,
-            clientSecret: env("GOOGLE_CLIENT_SECRET") as string,
+            clientId: googleId,
+            clientSecret: googleSecret,
             prompt: "select_account",
           },
         },
