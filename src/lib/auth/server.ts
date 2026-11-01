@@ -81,10 +81,7 @@ async function workerValue(key: string): Promise<string | undefined> {
   const fromProcess = env(key);
   if (fromProcess) return fromProcess;
   try {
-    const load = new Function("specifier", "return import(specifier)") as (
-      specifier: string,
-    ) => Promise<{ env: Record<string, unknown> }>;
-    const { env: cf } = await load("cloudflare:workers");
+    const { env: cf } = await import("cloudflare:workers");
     const value = cf[key];
     if (typeof value === "string" && value.trim()) return value.trim();
   } catch {

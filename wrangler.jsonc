@@ -4,12 +4,10 @@
   "main": "@tanstack/react-start/server-entry",
   "compatibility_date": "2026-10-28",
   "compatibility_flags": ["nodejs_compat"],
-  "observability": { "enabled": true },
-  "d1_databases": [
-    {
-      "binding": "DB",
-      "database_name": "maitland",
-      "database_id": "632e9748-8503-47e0-b7e6-0201293ad168"
-    }
-  ]
+  "keep_vars": true,
+  "vars": {
+    "BETTER_AUTH_URL": "https://maitland.sabelalogic.workers.dev",
+    "GOOGLE_CLIENT_ID": "28201054093-4s43qjabvddih4v3pcic7jof72spl35a.apps.googleusercontent.com"
+  },
+  "observability": { "enabled": true }
 }
