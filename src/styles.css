@@ -364,6 +364,44 @@
   text-decoration: underline;
 }
 
+.floor-card {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  min-height: 88px;
+  padding: 10px 12px;
+  border: 1px solid rgba(201, 162, 75, 0.35);
+  border-radius: 18px;
+  background: #102018;
+  color: inherit;
+  text-align: left;
+}
+
+.floor-card img {
+  width: 64px;
+  height: 64px;
+  border-radius: 999px;
+  object-fit: cover;
+  border: 1px solid #c9a24b;
+}
+
+.floor-card strong {
+  display: block;
+  font-family: var(--font-display);
+  font-style: italic;
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.floor-card em {
+  display: block;
+  margin-top: 2px;
+  color: #a8b5a0;
+  font-style: normal;
+  font-size: 14px;
+}
+
 .trust {
   position: fixed;
   right: 0;

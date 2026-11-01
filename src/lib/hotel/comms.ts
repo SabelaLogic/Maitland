@@ -260,7 +260,7 @@ async function accountGate(userId: string) {
     select u."emailVerified" as verified, u.email, u.name,
       exists(
         select 1 from "account" a
-        where a."userId" = u.id and a."providerId" = ${"grok-google"}
+        where a."userId" = u.id and (a."providerId" = ${"google"} or a."providerId" = ${"grok-google"})
       ) as gmail
     from "user" u
     where u.id = ${userId}

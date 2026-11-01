@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Link } from "@tanstack/react-router";
 import { LiveChat } from "@/components/hotel/live-chat";
 import { GoldButton, errText } from "@/components/hotel/ui";
-import { GROK_PROVIDERS, authClient, signIn } from "@/lib/auth/client";
+import { GROK_PROVIDERS, authClient, signIn, signOut } from "@/lib/auth/client";
 import { useCurrentUserState } from "@/lib/auth/use-current-user";
 import {
   ACCESS_CENTS,
@@ -38,9 +38,9 @@ function readGuest(): SavedGuest | null {
 }
 
 export function GuestHome() {
-  const { user } = useCurrentUserState();
+  const { user, isPending } = useCurrentUserState();
   const [index, setIndex] = useState(0);
-  const [sheet, setSheet] = useState<"access" | "chat" | "apply" | null>(null);
+  const [sheet, setSheet] = useState<"access" | "chat" | "apply" | "floor" | null>(null);
   const [thread, setThread] = useState<ThreadView | null>(null);
   const [ready, setReady] = useState(false);
   const [guest, setGuest] = useState<SavedGuest | null>(null);
@@ -58,6 +58,14 @@ export function GuestHome() {
   const [applySent, setApplySent] = useState(false);
   const host = ROSTER[index] ?? ROSTER[0];
   const pendingLines = useRef<string[]>([]);
+  const greeted = useRef(false);
+  const firstName = user?.displayName?.split(" ")[0] || "guest";
+
+  useEffect(() => {
+    if (!user || greeted.current) return;
+    greeted.current = true;
+    setSheet("floor");
+  }, [user]);
 
   useEffect(() => {
     setGuest(readGuest());
@@ -188,12 +196,27 @@ export function GuestHome() {
   }
 
   function startChat() {
+    if (user) {
+      setSheet("floor");
+      return;
+    }
     if (!ready && !guest) {
       setSheet("access");
       return;
     }
     setSheet("chat");
     if (ready && !thread) void openWithAccount();
+  }
+
+  function chooseHost(next: number) {
+    const face = ROSTER[next] ?? ROSTER[0];
+    setIndex(next);
+    setThread(null);
+    setSheet("chat");
+    if (!user) return;
+    void openAccountLine({ data: { hostessKey: face.key } })
+      .then(setThread)
+      .catch(() => undefined);
   }
 
   async function mirror(body: string) {
@@ -241,7 +264,8 @@ export function GuestHome() {
     }, 90);
   }
 
-  const sheetTitle = sheet === "apply" ? "Become a Hostess" : "Unlock the line";
+  const sheetTitle =
+    sheet === "apply" ? "Become a Hostess" : sheet === "floor" ? "Maitland Hostesses" : "Unlock the line";
 
   return (
     <main className="landing">
@@ -259,8 +283,8 @@ export function GuestHome() {
           <button type="button" className="tab-btn" onClick={() => setSheet("apply")}>
             Become a Hostess
           </button>
-          <button type="button" className="tab-btn gold-fill" onClick={() => (ready ? startChat() : setSheet("access"))}>
-            Login
+          <button type="button" className="tab-btn gold-fill" onClick={() => (user ? setSheet("floor") : setSheet("access"))}>
+            {isPending ? "…" : user ? firstName : "Login"}
           </button>
         </div>
 
@@ -270,7 +294,9 @@ export function GuestHome() {
           </span>
           <p>Maitland House</p>
           <h1>Bespoke hospitality</h1>
-          <p className="splash-sub">Private arrival. The suite is already prepared.</p>
+          <p className="splash-sub">
+            {user ? `Welcome, ${firstName}. Choose who hosts the evening.` : "Private arrival. The suite is already prepared."}
+          </p>
         </header>
 
         <div className="stage">
@@ -283,7 +309,7 @@ export function GuestHome() {
             <img src={nextHost.portrait} alt="" />
           </button>
           <article key={host.key} className={`${arrive} fan-card front`}>
-            <button type="button" className="fan-hit" onClick={startChat} aria-label={`Open a line with ${host.name}`}>
+            <button type="button" className="fan-hit" onClick={() => (user ? chooseHost(index) : startChat())} aria-label={`Open a line with ${host.name}`}>
               <img src={host.portrait} alt="" />
               <div className="fan-ov">
                 <div className="fan-name">{host.name}</div>
@@ -338,7 +364,7 @@ export function GuestHome() {
       </div>
 
       {sheet === "chat" ? (
-        <LiveChat key={host.key} host={host} onClose={() => setSheet(null)} onGuestLine={(body) => void mirror(body)} />
+        <LiveChat key={host.key} host={host} onClose={() => setSheet(user ? "floor" : null)} onGuestLine={(body) => void mirror(body)} />
       ) : null}
 
       {sheet && sheet !== "chat" ? (
@@ -356,7 +382,25 @@ export function GuestHome() {
               </p>
             ) : null}
 
-            {sheet === "apply" ? (
+            {sheet === "floor" ? (
+              <div className="mt-4 flex flex-col gap-3">
+                <p className="text-sm leading-relaxed text-muted">
+                  Welcome, {firstName}. Tap a hostess. She takes the time, the length, and the brief, then the folio.
+                </p>
+                {ROSTER.map((face, i) => (
+                  <button key={face.key} type="button" className="floor-card" onClick={() => chooseHost(i)}>
+                    <img src={face.portrait} alt="" />
+                    <span>
+                      <strong>{face.name}</strong>
+                      <em>Available tonight · {face.vibe.toLowerCase()}</em>
+                    </span>
+                  </button>
+                ))}
+                <button type="button" className="min-h-11 text-sm text-gold" onClick={() => void signOut("/")}>
+                  Sign out
+                </button>
+              </div>
+            ) : sheet === "apply" ? (
               <form
                 className="mt-4 flex flex-col gap-3"
                 onSubmit={(e) => {
